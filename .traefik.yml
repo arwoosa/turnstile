@@ -1,0 +1,13 @@
+displayName: Cloudflare Turnstile
+type: middleware
+iconPath: .assets/logo.png
+
+import: github.com/arwoosa/turnstile
+
+summary: 'This is a middleware plugin for Traefik that integrates Cloudflare Turnstile service into your web applications'
+
+testData:
+  turnstilesecret: replace-me
+  routers:
+    - method: POST
+      path: /verify
