@@ -11,6 +11,7 @@ A Traefik middleware plugin that integrates Cloudflare's Turnstile CAPTCHA servi
 - 🔒 Secure token verification through Cloudflare's API
 - 🚦 Comprehensive error handling and reporting
 - 🔄 Maintains request integrity during verification
+- 📦 Support for path parameters in route matching
 
 ## Prerequisites
 
@@ -46,9 +47,11 @@ http:
           routers:
             - method: POST
               path: /verify
-            - method: POST
-              path: /submit
-            # Add more routes as needed
+              headerkey: "X-Turnstile-Token"  # Optional: specify header key
+              formkey: "cf-turnstile-response"  # Optional: specify form key
+            - method: GET
+              path: /api/identity/{token}  # Support for path parameters
+              headerkey: "X-Turnstile-Token"
 ```
 
 ### Configuration Options
@@ -58,7 +61,82 @@ http:
 | `turnstilesecret` | String | Yes | Your Cloudflare Turnstile secret key |
 | `routers` | Array | Yes | List of routes to protect |
 | `routers[].method` | String | Yes | HTTP method (GET, POST, etc.) |
-| `routers[].path` | String | Yes | URL path to protect |
+| `routers[].path` | String | Yes | URL path to protect (supports {parameter} syntax) |
+| `routers[].headerkey` | String | No | Header key to extract token from (default: none) |
+| `routers[].formkey` | String | No | Form key to extract token from (default: "cf-turnstile-response") |
+
+## Token Extraction Configuration
+
+The plugin supports flexible token extraction from both HTTP headers and form fields. You can configure this per route using `headerkey` and `formkey` options.
+
+### Header-based Token Extraction
+
+To extract the token from an HTTP header:
+
+```yaml
+routers:
+  - method: GET
+    path: /api/identity/{token}
+    headerkey: "X-Turnstile-Token"  # Token will be read from this header
+```
+
+Example request:
+```http
+GET /api/identity/123
+X-Turnstile-Token: your-turnstile-token
+```
+
+### Form-based Token Extraction
+
+To extract the token from a form field:
+
+```yaml
+routers:
+  - method: POST
+    path: /verify
+    formkey: "cf-turnstile-response"  # Token will be read from this form field
+```
+
+Example request:
+```http
+POST /verify
+Content-Type: application/x-www-form-urlencoded
+
+cf-turnstile-response=your-turnstile-token
+```
+
+### Default Behavior
+
+- If neither `headerkey` nor `formkey` is specified, the plugin will:
+  - First try to read from the default form field `cf-turnstile-response`
+  - If not found in form, return an error
+
+### Best Practices
+
+1. For API endpoints, prefer `headerkey`:
+   ```yaml
+   routers:
+     - method: GET
+       path: /api/endpoint
+       headerkey: "X-Turnstile-Token"
+   ```
+
+2. For form submissions, use `formkey`:
+   ```yaml
+   routers:
+     - method: POST
+       path: /submit
+       formkey: "cf-turnstile-response"
+   ```
+
+3. For mixed usage, specify both:
+   ```yaml
+   routers:
+     - method: POST
+       path: /api/submit
+       headerkey: "X-Turnstile-Token"
+       formkey: "cf-turnstile-response"
+   ```
 
 ## Usage
 
@@ -98,12 +176,33 @@ http:
           routers:
             - method: POST
               path: /verify
+              formkey: "cf-turnstile-response"
+            - method: GET
+              path: /api/identity/{token}
+              headerkey: "X-Turnstile-Token"
 ```
+
+## Path Parameter Support
+
+The plugin supports path parameters in route matching. For example:
+
+```yaml
+routers:
+  - method: GET
+    path: /api/identity/{token}  # Will match /api/identity/123, /api/identity/abc, etc.
+    headerkey: "X-Turnstile-Token"
+```
+
+The path parameter matching:
+- Supports any value in place of `{parameter}`
+- Is case-insensitive
+- Requires exact path segment matching
+- Works with multiple parameters in the same path
 
 ## How It Works
 
 1. When a request is made to a protected route, the plugin checks for the presence of a Turnstile token
-2. The token is extracted from the `cf-turnstile-response` form field
+2. The token is extracted from either the specified header or form field
 3. The plugin verifies the token with Cloudflare's verification API
 4. If verification succeeds, the request proceeds to the next handler
 5. If verification fails, an error response is returned

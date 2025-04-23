@@ -11,3 +11,6 @@ testData:
   routers:
     - method: POST
       path: /verify
+    - method: GET
+      path: /verify
+      headerkey: X-Turnstile-Token

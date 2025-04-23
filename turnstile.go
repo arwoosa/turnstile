@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,9 +14,64 @@ import (
 	"strings"
 )
 
+// Router is a struct that represents a router in the configuration file.
 type Router struct {
 	Method string `yaml:"method"`
 	Path   string `yaml:"path"`
+	// HeaderKey is the key of the header to check for the token, if not provided, the form key will be used
+	HeaderKey string `yaml:"headerkey"`
+	// FormKey is the key of the form to check for the token, if not provided, the default value cf-turnstile-response will be used
+	FormKey string `yaml:"formkey"`
+}
+
+func (r *Router) isMatch(req *http.Request) bool {
+	if !strings.EqualFold(req.Method, r.Method) {
+		return false
+	}
+
+	requestPath := strings.ToLower(req.URL.Path)
+
+	routerParts := strings.Split(strings.Trim(r.Path, "/"), "/")
+	requestParts := strings.Split(strings.Trim(requestPath, "/"), "/")
+
+	if len(routerParts) != len(requestParts) {
+		return false
+	}
+
+	for i := 0; i < len(routerParts); i++ {
+		// Check if this part is a parameter (wrapped in {})
+		if strings.HasPrefix(routerParts[i], "{") && strings.HasSuffix(routerParts[i], "}") {
+			continue // Skip parameter comparison
+		}
+		// Otherwise, check for exact match
+		if routerParts[i] != requestParts[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *Router) getToken(req *http.Request) (string, error) {
+	if t.HeaderKey != "" {
+		return req.Header.Get(t.HeaderKey), nil
+	}
+	formKey := "cf-turnstile-response"
+	if t.FormKey != "" {
+		formKey = t.FormKey
+	}
+	copyReq, err := copyRequest(req)
+	if err != nil {
+		return "", errors.New("failed to copy request")
+	}
+	err = copyReq.ParseForm()
+	if err != nil {
+		return "", errors.New("failed to parse form")
+	}
+	token := copyReq.Form.Get(formKey)
+	if token == "" {
+		return "", errors.New("no token provided")
+	}
+	return token, nil
 }
 
 func init() {
@@ -37,7 +93,7 @@ func CreateConfig() *Config {
 type turnstile struct {
 	next             http.Handler
 	secret           string
-	protectedRouters map[string]bool
+	protectedRouters []Router
 }
 
 // New created a new Demo plugin.
@@ -45,41 +101,26 @@ func New(ctx context.Context, next http.Handler, config *Config, name string) (h
 	if len(config.TurnstileSecret) == 0 {
 		return nil, fmt.Errorf("turnstilesecret cannot be empty")
 	}
-	protectedRouters := make(map[string]bool)
-	for _, router := range config.Routers {
-		var buf strings.Builder
-		buf.WriteString(strings.ToLower(router.Method))
-		buf.WriteString(":")
-		buf.WriteString(strings.ToLower(router.Path))
-		protectedRouters[buf.String()] = true
-	}
+
 	return &turnstile{
 		next:             next,
 		secret:           config.TurnstileSecret,
-		protectedRouters: protectedRouters,
+		protectedRouters: config.Routers,
 	}, nil
 }
 
 // checks for a specific header in the response, extracts its value,
 // sends a notification POST request, and logs the result.
 func (a *turnstile) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-	if !a.isProtectedPath(req) {
+	router, ok := a.isProtectedPath(req)
+	if !ok {
 		a.next.ServeHTTP(rw, req)
 		return
 	}
-	copyReq, err := copyRequest(req)
+
+	token, err := router.getToken(req)
 	if err != nil {
-		errorHandler(rw, http.StatusInternalServerError, "Failed to copy request")
-		return
-	}
-	err = req.ParseForm()
-	if err != nil {
-		errorHandler(rw, http.StatusBadRequest, "Failed to parse form")
-		return
-	}
-	token := req.Form.Get("cf-turnstile-response")
-	if token == "" {
-		errorHandler(rw, http.StatusBadRequest, "No token provided")
+		errorHandler(rw, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -121,7 +162,7 @@ func (a *turnstile) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 		errorHandler(rw, http.StatusBadRequest, fmt.Sprintf("Verification failed: %s", turnstileResp.ErrorCodes))
 		return
 	}
-	a.next.ServeHTTP(rw, copyReq)
+	a.next.ServeHTTP(rw, req)
 
 }
 
@@ -131,9 +172,13 @@ func errorHandler(rw http.ResponseWriter, code int, msg string) {
 	_ = json.NewEncoder(rw).Encode(map[string]string{"error": msg})
 }
 
-func (a *turnstile) isProtectedPath(req *http.Request) bool {
-	router := strings.ToLower(req.Method) + ":" + strings.ToLower(req.URL.Path)
-	return a.protectedRouters[router]
+func (a *turnstile) isProtectedPath(req *http.Request) (*Router, bool) {
+	for _, router := range a.protectedRouters {
+		if router.isMatch(req) {
+			return &router, true
+		}
+	}
+	return nil, false
 }
 
 type turnstileResponse struct {
